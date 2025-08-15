@@ -428,4 +428,14 @@ def _get_json_schema_type(param_type: type) -> dict[str, str]:
                 return {"type": "audio"}
         except ModuleNotFoundError:
             pass
+    
+    # Check if it's a Pydantic model and automatically extract schema
+    try:
+        from pydantic import BaseModel
+        if isinstance(param_type, type) and issubclass(param_type, BaseModel):
+            schema = param_type.model_json_schema()
+            return {"type": "object", "schema": schema}
+    except (ImportError, TypeError):
+        pass
+    
     return {"type": "object"}
