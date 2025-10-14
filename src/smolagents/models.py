@@ -1589,6 +1589,7 @@ class OpenAIServerModel(ApiModel):
             flatten_messages_as_text=flatten_messages_as_text,
             **kwargs,
         )
+        self._last_response_id: str | None = None
 
     def create_client(self):
         try:
@@ -1806,6 +1807,9 @@ class OpenAIResponsesModel(ApiModel):
         response_kwargs["input"] = self._convert_messages_to_input(messages_payload)
         if response_format_payload is not None:
             response_kwargs["text"] = {"format": response_format_payload}
+        cached_response_id = getattr(self, "_last_response_id", None)
+        if "previous_response_id" not in response_kwargs and "conversation" not in response_kwargs and cached_response_id:
+            response_kwargs["previous_response_id"] = cached_response_id
         return response_kwargs
 
     @staticmethod
@@ -1939,6 +1943,7 @@ class OpenAIResponsesModel(ApiModel):
         )
         self._apply_rate_limit()
         response = self.client.responses.create(**response_kwargs)
+        self._last_response_id = getattr(response, "id", None) or getattr(self, "_last_response_id", None)
         return self._convert_response_to_chat_message(response, stop_sequences=stop_sequences)
 
     def generate_stream(
@@ -1961,6 +1966,7 @@ class OpenAIResponsesModel(ApiModel):
         tool_call_state: dict[int, dict[str, Any]] = {}
         accumulated_text = ""
         filtered_text = ""
+        latest_response_id: str | None = getattr(self, "_last_response_id", None)
         with self.client.responses.create(**response_kwargs) as stream:
             for event in stream:
                 event_type = getattr(event, "type", "")
@@ -2039,6 +2045,7 @@ class OpenAIResponsesModel(ApiModel):
                     )
                 elif event_type == "response.completed":
                     usage = getattr(getattr(event, "response", None), "usage", None)
+                    latest_response_id = getattr(getattr(event, "response", None), "id", latest_response_id)
                     if usage is not None:
                         yield ChatMessageStreamDelta(
                             token_usage=TokenUsage(
@@ -2049,6 +2056,13 @@ class OpenAIResponsesModel(ApiModel):
                 elif event_type in {"response.failed", "response.error"}:
                     error = getattr(event, "error", None)
                     raise RuntimeError(f"OpenAI Responses streaming failed with error: {error}")
+        if latest_response_id is not None:
+            self._last_response_id = latest_response_id
+
+
+    def reset_conversation(self):
+        """Clear any cached response id so the next call starts a fresh conversation."""
+        self._last_response_id = None
 
 
 class AzureOpenAIServerModel(OpenAIServerModel):
