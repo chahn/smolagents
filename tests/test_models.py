@@ -17,6 +17,7 @@ import sys
 import unittest
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 
 import pytest
 from huggingface_hub import ChatCompletionOutputMessage
@@ -33,6 +34,7 @@ from smolagents.models import (
     MessageRole,
     MLXModel,
     Model,
+    OpenAIResponsesModel,
     OpenAIModel,
     TransformersModel,
     get_clean_message_list,
@@ -569,6 +571,140 @@ class TestOpenAIModel:
             assert result.content == "This is some text"
             assert "<STOP>" not in result.content
             assert "and this should be removed" not in result.content
+
+
+class TestOpenAIResponsesModel:
+    def test_client_kwargs_passed_correctly(self):
+        model_id = "gpt-4o"
+        api_base = "https://api.openai.com/v1"
+        api_key = "test_api_key"
+        organization = "test_org"
+        project = "test_project"
+        client_kwargs = {"max_retries": 3}
+
+        with patch("openai.OpenAI") as MockOpenAI:
+            model = OpenAIResponsesModel(
+                model_id=model_id,
+                api_base=api_base,
+                api_key=api_key,
+                organization=organization,
+                project=project,
+                client_kwargs=client_kwargs,
+            )
+
+        MockOpenAI.assert_called_once_with(
+            base_url=api_base,
+            api_key=api_key,
+            organization=organization,
+            project=project,
+            max_retries=3,
+        )
+        assert model.client == MockOpenAI.return_value
+
+    def test_generate_converts_messages_and_parses_response(self):
+        response = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    content=[SimpleNamespace(type="output_text", text="Hello!")]
+                )
+            ],
+            usage=SimpleNamespace(input_tokens=7, output_tokens=11),
+        )
+
+        with patch("openai.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.responses.create.return_value = response
+
+            model = OpenAIResponsesModel(model_id="gpt-4o", api_key="test")
+            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
+            result = model.generate(messages)
+
+        call_kwargs = mock_client.responses.create.call_args.kwargs
+        assert call_kwargs["model"] == "gpt-4o"
+        assert "stream" not in call_kwargs
+        request_input = call_kwargs["input"]
+        assert request_input == [{"role": "user", "content": [{"type": "input_text", "text": "Ping"}]}]
+        assert result.content == "Hello!"
+        assert result.token_usage.input_tokens == 7
+        assert result.token_usage.output_tokens == 11
+        assert result.tool_calls is None
+
+    def test_generate_parses_tool_calls(self):
+        response = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="final_answer",
+                    arguments='{"answer": "42"}',
+                    id="call_1",
+                    call_id="call_1",
+                )
+            ],
+            usage=None,
+        )
+
+        with patch("openai.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.responses.create.return_value = response
+
+            model = OpenAIResponsesModel(model_id="gpt-4o-mini", api_key="test")
+            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
+            result = model.generate(messages)
+
+        assert result.tool_calls is not None
+        assert len(result.tool_calls) == 1
+        tool_call = result.tool_calls[0]
+        assert tool_call.function.name == "final_answer"
+        assert tool_call.function.arguments == {"answer": "42"}
+        assert result.content == ""
+
+    def test_generate_stream_emits_text_and_usage(self):
+        class DummyStream:
+            def __init__(self, events):
+                self._iterator = iter(events)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self._iterator)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                return False
+
+        events = [
+            SimpleNamespace(type="response.output_text.delta", delta="Hello", sequence_number=1),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(usage=SimpleNamespace(input_tokens=5, output_tokens=3)),
+                sequence_number=2,
+            ),
+        ]
+
+        with patch("openai.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.responses.create.return_value = DummyStream(events)
+
+            model = OpenAIResponsesModel(model_id="gpt-4o-mini", api_key="test")
+            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
+            deltas = list(model.generate_stream(messages, stop_sequences=["lo"]))
+
+        call_kwargs = mock_client.responses.create.call_args.kwargs
+        assert call_kwargs["stream"] is True
+        assert call_kwargs["stream_options"]["include_usage"] is True
+        assert call_kwargs["input"][0]["content"][0]["type"] == "input_text"
+        assert len(deltas) == 2
+        assert deltas[0].content == "Hel"
+        assert deltas[1].token_usage.input_tokens == 5
+        assert deltas[1].token_usage.output_tokens == 3
 
 
 class TestAmazonBedrockModel:
