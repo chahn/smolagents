@@ -706,6 +706,26 @@ class TestOpenAIResponsesModel:
         assert deltas[1].token_usage.input_tokens == 5
         assert deltas[1].token_usage.output_tokens == 3
 
+    def test_generate_converts_assistant_messages_to_output_text(self):
+        response = SimpleNamespace(output=[], usage=None)
+
+        with patch("openai.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.responses.create.return_value = response
+
+            model = OpenAIResponsesModel(model_id="gpt-4o", api_key="test")
+            messages = [
+                ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}]),
+                ChatMessage(role=MessageRole.ASSISTANT, content=[{"type": "text", "text": "Pong"}]),
+            ]
+            model.generate(messages)
+
+        request_input = mock_client.responses.create.call_args.kwargs["input"]
+        assert request_input[1]["role"] == "assistant"
+        assert request_input[1]["content"][0]["type"] == "output_text"
+        assert request_input[1]["content"][0]["text"] == "Pong"
+
 
 class TestAmazonBedrockModel:
     def test_client_for_bedrock(self):
