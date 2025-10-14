@@ -683,7 +683,7 @@ class TestOpenAIResponsesModel:
             SimpleNamespace(type="response.output_text.delta", delta="Hello", sequence_number=1),
             SimpleNamespace(
                 type="response.completed",
-                response=SimpleNamespace(usage=SimpleNamespace(input_tokens=5, output_tokens=3)),
+                response=SimpleNamespace(id="resp_stream", usage=SimpleNamespace(input_tokens=5, output_tokens=3)),
                 sequence_number=2,
             ),
         ]
@@ -705,6 +705,106 @@ class TestOpenAIResponsesModel:
         assert deltas[0].content == "Hel"
         assert deltas[1].token_usage.input_tokens == 5
         assert deltas[1].token_usage.output_tokens == 3
+        assert model._last_response_id == "resp_stream"
+
+    def test_generate_chains_previous_response_id(self):
+        responses = [
+            SimpleNamespace(
+                id="resp_1",
+                output=[SimpleNamespace(type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="First")])],
+                usage=None,
+            ),
+            SimpleNamespace(
+                id="resp_2",
+                output=[SimpleNamespace(type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Second")])],
+                usage=None,
+            ),
+        ]
+
+        with patch("openai.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.responses.create.side_effect = responses
+
+            model = OpenAIResponsesModel(model_id="gpt-4o", api_key="test")
+            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
+
+            model.generate(messages)
+            first_kwargs = mock_client.responses.create.call_args_list[0].kwargs
+            assert "previous_response_id" not in first_kwargs
+            assert model._last_response_id == "resp_1"
+
+            model.generate(messages)
+            second_kwargs = mock_client.responses.create.call_args_list[1].kwargs
+            assert second_kwargs["previous_response_id"] == "resp_1"
+            assert model._last_response_id == "resp_2"
+
+    def test_generate_respects_explicit_previous_response_id(self):
+        response = SimpleNamespace(
+            id="resp_custom",
+            output=[SimpleNamespace(type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Hello")])],
+            usage=None,
+        )
+
+        with patch("openai.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.responses.create.return_value = response
+
+            model = OpenAIResponsesModel(model_id="gpt-4o", api_key="test")
+            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
+
+            model.generate(messages, previous_response_id="override")
+            call_kwargs = mock_client.responses.create.call_args.kwargs
+            assert call_kwargs["previous_response_id"] == "override"
+            assert model._last_response_id == "resp_custom"
+
+    def test_generate_skips_previous_id_when_conversation_passed(self):
+        response = SimpleNamespace(
+            id="resp_conv",
+            output=[SimpleNamespace(type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Hello")])],
+            usage=None,
+        )
+
+        with patch("openai.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.responses.create.return_value = response
+
+            model = OpenAIResponsesModel(model_id="gpt-4o", api_key="test")
+            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
+
+            model.generate(messages, conversation="conv_1")
+            call_kwargs = mock_client.responses.create.call_args.kwargs
+            assert "previous_response_id" not in call_kwargs
+            assert call_kwargs["conversation"] == "conv_1"
+            assert model._last_response_id == "resp_conv"
+
+    def test_reset_conversation(self):
+        response = SimpleNamespace(
+            id="resp_reset",
+            output=[SimpleNamespace(type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Hello")])],
+            usage=None,
+        )
+
+        with patch("openai.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.responses.create.return_value = response
+
+            model = OpenAIResponsesModel(model_id="gpt-4o", api_key="test")
+            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
+
+            model.generate(messages)
+            assert model._last_response_id == "resp_reset"
+
+            model.reset_conversation()
+            mock_client.responses.create.reset_mock()
+            mock_client.responses.create.return_value = response
+
+            model.generate(messages)
+            call_kwargs = mock_client.responses.create.call_args.kwargs
+            assert "previous_response_id" not in call_kwargs
 
     def test_generate_converts_assistant_messages_to_output_text(self):
         response = SimpleNamespace(output=[], usage=None)
