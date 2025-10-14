@@ -1848,16 +1848,23 @@ class OpenAIResponsesModel(ApiModel):
             role = message.get("role")
             content = message.get("content")
             if isinstance(content, str):
-                converted_messages.append({"role": role, "content": content})
+                converted_messages.append(
+                    {
+                        "role": role,
+                        "content": [OpenAIResponsesModel._build_text_content(role, content)],
+                    }
+                )
                 continue
             if content is None:
-                converted_messages.append({"role": role, "content": ""})
+                converted_messages.append({"role": role, "content": []})
                 continue
             converted_parts: list[dict[str, Any]] = []
             for part in content:
                 part_type = part.get("type")
                 if part_type in {"text", "input_text"}:
-                    converted_parts.append({"type": "input_text", "text": part.get("text", "")})
+                    converted_parts.append(OpenAIResponsesModel._build_text_content(role, part.get("text", "")))
+                elif part_type == "output_text":
+                    converted_parts.append(OpenAIResponsesModel._build_text_content(role, part.get("text", "")))
                 elif part_type == "image_url":
                     image_info = part.get("image_url", {})
                     if isinstance(image_info, dict):
@@ -1879,6 +1886,11 @@ class OpenAIResponsesModel(ApiModel):
                     raise ValueError(f"Unsupported content type '{part_type}' for Responses API.")
             converted_messages.append({"role": role, "content": converted_parts})
         return converted_messages
+
+    @staticmethod
+    def _build_text_content(role: str | None, text: str) -> dict[str, Any]:
+        content_type = "output_text" if role == MessageRole.ASSISTANT.value else "input_text"
+        return {"type": content_type, "text": text}
 
     @staticmethod
     def _extract_tool_calls_from_response(response: Any) -> list[ChatMessageToolCall]:
