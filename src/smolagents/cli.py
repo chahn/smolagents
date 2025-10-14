@@ -19,7 +19,16 @@ import os
 
 from dotenv import load_dotenv
 
-from smolagents import CodeAgent, InferenceClientModel, LiteLLMModel, Model, OpenAIServerModel, Tool, TransformersModel
+from smolagents import (
+    CodeAgent,
+    InferenceClientModel,
+    LiteLLMModel,
+    Model,
+    OpenAIResponsesModel,
+    OpenAIServerModel,
+    Tool,
+    TransformersModel,
+)
 from smolagents.default_tools import TOOL_MAPPING
 
 
@@ -39,7 +48,7 @@ def parse_arguments():
         "--model-type",
         type=str,
         default="InferenceClientModel",
-        help="The model type to use (e.g., InferenceClientModel, OpenAIServerModel, LiteLLMModel, TransformersModel)",
+        help="The model type to use (e.g., InferenceClientModel, OpenAIServerModel, OpenAIResponsesModel, LiteLLMModel, TransformersModel)",
     )
     parser.add_argument(
         "--model-id",
@@ -96,6 +105,12 @@ def load_model(
         return OpenAIServerModel(
             api_key=api_key or os.getenv("FIREWORKS_API_KEY"),
             api_base=api_base or "https://api.fireworks.ai/inference/v1",
+            model_id=model_id,
+        )
+    elif model_type == "OpenAIResponsesModel":
+        return OpenAIResponsesModel(
+            api_key=api_key or os.getenv("OPENAI_API_KEY"),
+            api_base=api_base,
             model_id=model_id,
         )
     elif model_type == "LiteLLMModel":
