@@ -1722,6 +1722,356 @@ class OpenAIModel(ApiModel):
 OpenAIServerModel = OpenAIModel
 
 
+class OpenAIResponsesModel(ApiModel):
+    """Model that uses the OpenAI Responses API instead of legacy chat completions."""
+
+    _ALLOWED_RESPONSE_PARAMS = {
+        "background",
+        "conversation",
+        "include",
+        "instructions",
+        "max_output_tokens",
+        "max_tool_calls",
+        "metadata",
+        "parallel_tool_calls",
+        "previous_response_id",
+        "prompt",
+        "prompt_cache_key",
+        "reasoning",
+        "safety_identifier",
+        "service_tier",
+        "store",
+        "stream_options",
+        "temperature",
+        "text",
+        "tool_choice",
+        "tools",
+        "top_logprobs",
+        "top_p",
+        "truncation",
+        "user",
+    }
+
+    def __init__(
+        self,
+        model_id: str,
+        api_base: str | None = None,
+        api_key: str | None = None,
+        organization: str | None = None,
+        project: str | None = None,
+        client_kwargs: dict[str, Any] | None = None,
+        custom_role_conversions: dict[str, str] | None = None,
+        flatten_messages_as_text: bool = False,
+        **kwargs,
+    ):
+        self.client_kwargs = {
+            **(client_kwargs or {}),
+            "api_key": api_key,
+            "base_url": api_base,
+            "organization": organization,
+            "project": project,
+        }
+        super().__init__(
+            model_id=model_id,
+            custom_role_conversions=custom_role_conversions,
+            flatten_messages_as_text=flatten_messages_as_text,
+            **kwargs,
+        )
+
+    def create_client(self):
+        try:
+            import openai
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "Please install 'openai' extra to use OpenAIResponsesModel: `pip install 'smolagents[openai]'`"
+            ) from e
+
+        return openai.OpenAI(**self.client_kwargs)
+
+    @property
+    def supports_stop_parameter(self) -> bool:
+        # The Responses API does not have a stop parameter; we handle stop sequences client-side.
+        return False
+
+    def _prepare_response_kwargs(
+        self,
+        messages: list[ChatMessage | dict],
+        stop_sequences: list[str] | None = None,
+        response_format: dict[str, Any] | None = None,
+        tools_to_call_from: list[Tool] | None = None,
+        *,
+        stream: bool = False,
+        **kwargs,
+    ) -> dict[str, Any]:
+        completion_kwargs = super()._prepare_completion_kwargs(
+            messages=messages,
+            stop_sequences=stop_sequences,
+            response_format=response_format,
+            tools_to_call_from=tools_to_call_from,
+            custom_role_conversions=self.custom_role_conversions,
+            convert_images_to_image_urls=True,
+            **kwargs,
+        )
+        messages_payload = completion_kwargs.pop("messages", [])
+        response_format_payload = completion_kwargs.pop("response_format", None)
+        # Remove unsupported parameters from completion kwargs
+        completion_kwargs.pop("stop", None)
+        stream_options = completion_kwargs.pop("stream_options", None)
+
+        response_kwargs: dict[str, Any] = {"model": self.model_id}
+        if stream:
+            response_kwargs["stream"] = True
+            merged_stream_options = {"include_usage": True}
+            if stream_options:
+                merged_stream_options.update(stream_options)
+            response_kwargs["stream_options"] = merged_stream_options
+        elif stream_options:
+            raise ValueError("`stream_options` can only be set when streaming is enabled.")
+
+        for key, value in completion_kwargs.items():
+            if key == "max_tokens":
+                response_kwargs["max_output_tokens"] = value
+            elif key in self._ALLOWED_RESPONSE_PARAMS:
+                response_kwargs[key] = value
+            else:
+                logger.debug("Dropping unsupported Responses API parameter '%s'", key)
+
+        response_kwargs["input"] = self._convert_messages_to_input(messages_payload)
+        if response_format_payload is not None:
+            response_kwargs["text"] = {"format": response_format_payload}
+        return response_kwargs
+
+    @staticmethod
+    def _convert_messages_to_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        converted_messages: list[dict[str, Any]] = []
+        for message in messages:
+            role = message.get("role")
+            content = message.get("content")
+            if isinstance(content, str):
+                converted_messages.append({"role": role, "content": content})
+                continue
+            if content is None:
+                converted_messages.append({"role": role, "content": ""})
+                continue
+            converted_parts: list[dict[str, Any]] = []
+            for part in content:
+                part_type = part.get("type")
+                if part_type in {"text", "input_text"}:
+                    converted_parts.append({"type": "input_text", "text": part.get("text", "")})
+                elif part_type == "image_url":
+                    image_info = part.get("image_url", {})
+                    if isinstance(image_info, dict):
+                        image_url = image_info.get("url")
+                        detail = image_info.get("detail")
+                    else:
+                        image_url = image_info
+                        detail = None
+                    converted_parts.append(
+                        {
+                            "type": "input_image",
+                            "image_url": image_url,
+                            "detail": detail or "auto",
+                        }
+                    )
+                elif part_type == "input_image":
+                    converted_parts.append(part)
+                else:
+                    raise ValueError(f"Unsupported content type '{part_type}' for Responses API.")
+            converted_messages.append({"role": role, "content": converted_parts})
+        return converted_messages
+
+    @staticmethod
+    def _extract_tool_calls_from_response(response: Any) -> list[ChatMessageToolCall]:
+        tool_calls: list[ChatMessageToolCall] = []
+        for output in getattr(response, "output", []) or []:
+            if getattr(output, "type", None) != "function_call":
+                continue
+            arguments = parse_json_if_needed(getattr(output, "arguments", ""))
+            call_id = getattr(output, "id", None) or getattr(output, "call_id", "")
+            tool_calls.append(
+                ChatMessageToolCall(
+                    function=ChatMessageToolCallFunction(
+                        name=getattr(output, "name", ""),
+                        arguments=arguments,
+                    ),
+                    id=str(call_id),
+                    type="function",
+                )
+            )
+        return tool_calls
+
+    def _convert_response_to_chat_message(
+        self,
+        response: Any,
+        stop_sequences: list[str] | None = None,
+    ) -> ChatMessage:
+        text_fragments: list[str] = []
+        detected_role: str = MessageRole.ASSISTANT.value
+        for output in getattr(response, "output", []) or []:
+            if getattr(output, "type", None) == "message":
+                detected_role = getattr(output, "role", detected_role)
+                for content in getattr(output, "content", []) or []:
+                    content_type = getattr(content, "type", None)
+                    if content_type == "output_text":
+                        text_fragments.append(getattr(content, "text", ""))
+                    elif content_type == "refusal":
+                        text_fragments.append(getattr(content, "refusal", ""))
+        content = "".join(text_fragments)
+        if stop_sequences:
+            content = remove_content_after_stop_sequences(content, stop_sequences)
+
+        tool_calls = self._extract_tool_calls_from_response(response)
+        usage = getattr(response, "usage", None)
+        token_usage = (
+            TokenUsage(
+                input_tokens=getattr(usage, "input_tokens", 0),
+                output_tokens=getattr(usage, "output_tokens", 0),
+            )
+            if usage is not None
+            else None
+        )
+        try:
+            role = MessageRole(detected_role)
+        except ValueError:
+            role = MessageRole.ASSISTANT
+        return ChatMessage(
+            role=role,
+            content=content,
+            tool_calls=tool_calls or None,
+            raw=response,
+            token_usage=token_usage,
+        )
+
+    def generate(
+        self,
+        messages: list[ChatMessage | dict],
+        stop_sequences: list[str] | None = None,
+        response_format: dict[str, Any] | None = None,
+        tools_to_call_from: list[Tool] | None = None,
+        **kwargs,
+    ) -> ChatMessage:
+        response_kwargs = self._prepare_response_kwargs(
+            messages=messages,
+            stop_sequences=stop_sequences,
+            response_format=response_format,
+            tools_to_call_from=tools_to_call_from,
+            stream=False,
+            **kwargs,
+        )
+        self._apply_rate_limit()
+        response = self.client.responses.create(**response_kwargs)
+        return self._convert_response_to_chat_message(response, stop_sequences=stop_sequences)
+
+    def generate_stream(
+        self,
+        messages: list[ChatMessage | dict],
+        stop_sequences: list[str] | None = None,
+        response_format: dict[str, Any] | None = None,
+        tools_to_call_from: list[Tool] | None = None,
+        **kwargs,
+    ) -> Generator[ChatMessageStreamDelta]:
+        response_kwargs = self._prepare_response_kwargs(
+            messages=messages,
+            stop_sequences=stop_sequences,
+            response_format=response_format,
+            tools_to_call_from=tools_to_call_from,
+            stream=True,
+            **kwargs,
+        )
+        self._apply_rate_limit()
+        tool_call_state: dict[int, dict[str, Any]] = {}
+        accumulated_text = ""
+        filtered_text = ""
+        with self.client.responses.create(**response_kwargs) as stream:
+            for event in stream:
+                event_type = getattr(event, "type", "")
+                if event_type == "response.output_text.delta":
+                    delta = getattr(event, "delta", "")
+                    accumulated_text += delta
+                    if stop_sequences:
+                        trimmed = remove_content_after_stop_sequences(accumulated_text, stop_sequences)
+                        delta_to_emit = trimmed[len(filtered_text) :]
+                        filtered_text = trimmed
+                        if delta_to_emit:
+                            yield ChatMessageStreamDelta(content=delta_to_emit)
+                    else:
+                        yield ChatMessageStreamDelta(content=delta)
+                elif event_type == "response.output_item.added" and getattr(getattr(event, "item", None), "type", None) == "function_call":
+                    item = event.item
+                    state = tool_call_state.setdefault(
+                        event.output_index,
+                        {"arguments": "", "name": getattr(item, "name", None), "id": getattr(item, "id", None) or getattr(item, "call_id", None)},
+                    )
+                    state["name"] = getattr(item, "name", state.get("name"))
+                    state["id"] = state.get("id") or getattr(item, "id", None) or getattr(item, "call_id", None)
+                    yield ChatMessageStreamDelta(
+                        tool_calls=[
+                            ChatMessageToolCallStreamDelta(
+                                index=event.output_index,
+                                id=state.get("id"),
+                                type="function",
+                                function=ChatMessageToolCallFunction(
+                                    name=state.get("name") or "",
+                                    arguments=state.get("arguments", ""),
+                                ),
+                            )
+                        ]
+                    )
+                elif event_type == "response.function_call.arguments.delta":
+                    state = tool_call_state.setdefault(
+                        event.output_index,
+                        {"arguments": "", "name": None, "id": getattr(event, "item_id", None)},
+                    )
+                    state["arguments"] += getattr(event, "delta", "")
+                    state["id"] = state.get("id") or getattr(event, "item_id", None)
+                    yield ChatMessageStreamDelta(
+                        tool_calls=[
+                            ChatMessageToolCallStreamDelta(
+                                index=event.output_index,
+                                id=state.get("id"),
+                                type="function",
+                                function=ChatMessageToolCallFunction(
+                                    name=state.get("name") or "",
+                                    arguments=state.get("arguments", ""),
+                                ),
+                            )
+                        ]
+                    )
+                elif event_type == "response.function_call.arguments.done":
+                    state = tool_call_state.setdefault(
+                        event.output_index,
+                        {"arguments": "", "name": getattr(event, "name", None), "id": getattr(event, "item_id", None)},
+                    )
+                    state["arguments"] = getattr(event, "arguments", state.get("arguments", ""))
+                    state["name"] = getattr(event, "name", state.get("name"))
+                    state["id"] = state.get("id") or getattr(event, "item_id", None)
+                    yield ChatMessageStreamDelta(
+                        tool_calls=[
+                            ChatMessageToolCallStreamDelta(
+                                index=event.output_index,
+                                id=state.get("id"),
+                                type="function",
+                                function=ChatMessageToolCallFunction(
+                                    name=state.get("name") or "",
+                                    arguments=state.get("arguments", ""),
+                                ),
+                            )
+                        ]
+                    )
+                elif event_type == "response.completed":
+                    usage = getattr(getattr(event, "response", None), "usage", None)
+                    if usage is not None:
+                        yield ChatMessageStreamDelta(
+                            token_usage=TokenUsage(
+                                input_tokens=getattr(usage, "input_tokens", 0),
+                                output_tokens=getattr(usage, "output_tokens", 0),
+                            )
+                        )
+                elif event_type in {"response.failed", "response.error"}:
+                    error = getattr(event, "error", None)
+                    raise RuntimeError(f"OpenAI Responses streaming failed with error: {error}")
+
+
 class AzureOpenAIModel(OpenAIModel):
     """This model connects to an Azure OpenAI deployment.
 
@@ -2001,6 +2351,7 @@ __all__ = [
     "LiteLLMModel",
     "LiteLLMRouterModel",
     "OpenAIServerModel",
+    "OpenAIResponsesModel",
     "OpenAIModel",
     "VLLMModel",
     "AzureOpenAIServerModel",
