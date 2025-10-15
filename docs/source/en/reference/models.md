@@ -144,7 +144,7 @@ print(model(messages))
 
 ### OpenAIServerModel
 
-This class lets you call any OpenAIServer compatible model.
+This class lets you call any OpenAI-compatible server that exposes the legacy Chat Completions API.
 Here's how you can set it (you can customise the `api_base` url to point to another server):
 ```py
 import os
@@ -171,6 +171,33 @@ model = OpenAIServerModel(
 ```
 
 [[autodoc]] OpenAIServerModel
+
+### OpenAIResponsesModel
+
+`OpenAIResponsesModel` integrates the OpenAI Responses API, which keeps a model's internal reasoning state between calls and exposes newer controls such as reasoning effort and text verbosity.
+
+```py
+import os
+from smolagents import OpenAIResponsesModel, ChatMessage, MessageRole
+
+messages = [
+    ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Summarise our planning notes."}])
+]
+
+model = OpenAIResponsesModel(
+    model_id="gpt-5",
+    api_key=os.environ["OPENAI_API_KEY"],
+    reasoning={"effort": "medium"},
+    text={"verbosity": "high"},
+)
+
+response = model.generate(messages)
+print(response.content)
+```
+
+You can also call `model.reset_conversation()` to clear the cached response ID when you need a fresh Responses API conversation.
+
+[[autodoc]] OpenAIResponsesModel
 
 ### AzureOpenAIServerModel
 
