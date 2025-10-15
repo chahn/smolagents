@@ -1924,12 +1924,21 @@ class OpenAIResponsesModel(ApiModel):
                     converted_parts.append(OpenAIResponsesModel._build_text_content(role, part.get("text", "")))
                 elif part_type == "image_url":
                     image_info = part.get("image_url", {})
+                    image_url: str | None = None
+                    detail: str | None = None
                     if isinstance(image_info, dict):
                         image_url = image_info.get("url")
                         detail = image_info.get("detail")
+                        mime_type = image_info.get("mime_type") or part.get("mime_type")
+                        if image_url is None:
+                            b64_json = image_info.get("b64_json")
+                            if b64_json is not None:
+                                mime_prefix = mime_type or "image/png"
+                                image_url = f"data:{mime_prefix};base64,{b64_json}"
                     else:
                         image_url = image_info
-                        detail = None
+                    if image_url is None:
+                        raise ValueError("Responses API image parts must include a 'url' or 'b64_json' field.")
                     converted_parts.append(
                         {
                             "type": "input_image",
@@ -1939,6 +1948,21 @@ class OpenAIResponsesModel(ApiModel):
                     )
                 elif part_type == "input_image":
                     converted_parts.append(part)
+                elif part_type in {"input_file", "file"}:
+                    file_info = part if part_type == "input_file" else part.get("file", {})
+                    if not isinstance(file_info, dict):
+                        raise ValueError("File content must be provided as a dict when using the Responses API.")
+                    file_payload: dict[str, Any] = {
+                        key: file_info.get(key) or part.get(key)
+                        for key in ("file_id", "file_url", "file_data", "filename")
+                        if (file_info.get(key) or part.get(key)) is not None
+                    }
+                    if not any(key in file_payload for key in ("file_id", "file_url", "file_data")):
+                        raise ValueError(
+                            "Responses API file parts require at least one of 'file_id', 'file_url', or 'file_data'."
+                        )
+                    file_payload["type"] = "input_file"
+                    converted_parts.append(file_payload)
                 else:
                     raise ValueError(f"Unsupported content type '{part_type}' for Responses API.")
             converted_messages.append({"role": role, "content": converted_parts})
