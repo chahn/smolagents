@@ -16,8 +16,8 @@ import json
 import sys
 import unittest
 from contextlib import ExitStack
-from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from huggingface_hub import ChatCompletionOutputMessage
@@ -34,8 +34,8 @@ from smolagents.models import (
     MessageRole,
     MLXModel,
     Model,
-    OpenAIResponsesModel,
     OpenAIModel,
+    OpenAIResponsesModel,
     TransformersModel,
     get_clean_message_list,
     get_tool_call_from_text,
@@ -561,9 +561,7 @@ class TestOpenAIResponsesModel:
         response = SimpleNamespace(
             output=[
                 SimpleNamespace(
-                    type="message",
-                    role="assistant",
-                    content=[SimpleNamespace(type="output_text", text="Hello!")]
+                    type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Hello!")]
                 )
             ],
             usage=SimpleNamespace(input_tokens=7, output_tokens=11),
@@ -667,12 +665,20 @@ class TestOpenAIResponsesModel:
         responses = [
             SimpleNamespace(
                 id="resp_1",
-                output=[SimpleNamespace(type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="First")])],
+                output=[
+                    SimpleNamespace(
+                        type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="First")]
+                    )
+                ],
                 usage=None,
             ),
             SimpleNamespace(
                 id="resp_2",
-                output=[SimpleNamespace(type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Second")])],
+                output=[
+                    SimpleNamespace(
+                        type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Second")]
+                    )
+                ],
                 usage=None,
             ),
         ]
@@ -698,7 +704,11 @@ class TestOpenAIResponsesModel:
     def test_generate_respects_explicit_previous_response_id(self):
         response = SimpleNamespace(
             id="resp_custom",
-            output=[SimpleNamespace(type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Hello")])],
+            output=[
+                SimpleNamespace(
+                    type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Hello")]
+                )
+            ],
             usage=None,
         )
 
@@ -718,7 +728,11 @@ class TestOpenAIResponsesModel:
     def test_generate_skips_previous_id_when_conversation_passed(self):
         response = SimpleNamespace(
             id="resp_conv",
-            output=[SimpleNamespace(type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Hello")])],
+            output=[
+                SimpleNamespace(
+                    type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Hello")]
+                )
+            ],
             usage=None,
         )
 
@@ -739,7 +753,11 @@ class TestOpenAIResponsesModel:
     def test_reset_conversation(self):
         response = SimpleNamespace(
             id="resp_reset",
-            output=[SimpleNamespace(type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Hello")])],
+            output=[
+                SimpleNamespace(
+                    type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Hello")]
+                )
+            ],
             usage=None,
         )
 

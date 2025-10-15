@@ -1856,7 +1856,11 @@ class OpenAIResponsesModel(ApiModel):
         if response_format_payload is not None:
             response_kwargs["text"] = {"format": response_format_payload}
         cached_response_id = getattr(self, "_last_response_id", None)
-        if "previous_response_id" not in response_kwargs and "conversation" not in response_kwargs and cached_response_id:
+        if (
+            "previous_response_id" not in response_kwargs
+            and "conversation" not in response_kwargs
+            and cached_response_id
+        ):
             response_kwargs["previous_response_id"] = cached_response_id
         return response_kwargs
 
@@ -2029,11 +2033,18 @@ class OpenAIResponsesModel(ApiModel):
                             yield ChatMessageStreamDelta(content=delta_to_emit)
                     else:
                         yield ChatMessageStreamDelta(content=delta)
-                elif event_type == "response.output_item.added" and getattr(getattr(event, "item", None), "type", None) == "function_call":
+                elif (
+                    event_type == "response.output_item.added"
+                    and getattr(getattr(event, "item", None), "type", None) == "function_call"
+                ):
                     item = event.item
                     state = tool_call_state.setdefault(
                         event.output_index,
-                        {"arguments": "", "name": getattr(item, "name", None), "id": getattr(item, "id", None) or getattr(item, "call_id", None)},
+                        {
+                            "arguments": "",
+                            "name": getattr(item, "name", None),
+                            "id": getattr(item, "id", None) or getattr(item, "call_id", None),
+                        },
                     )
                     state["name"] = getattr(item, "name", state.get("name"))
                     state["id"] = state.get("id") or getattr(item, "id", None) or getattr(item, "call_id", None)
@@ -2106,7 +2117,6 @@ class OpenAIResponsesModel(ApiModel):
                     raise RuntimeError(f"OpenAI Responses streaming failed with error: {error}")
         if latest_response_id is not None:
             self._last_response_id = latest_response_id
-
 
     def reset_conversation(self):
         """Clear any cached response id so the next call starts a fresh conversation."""
