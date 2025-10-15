@@ -1917,9 +1917,7 @@ class OpenAIResponsesModel(ApiModel):
             converted_parts: list[dict[str, Any]] = []
             for part in content:
                 part_type = part.get("type")
-                if part_type in {"text", "input_text"}:
-                    converted_parts.append(OpenAIResponsesModel._build_text_content(role, part.get("text", "")))
-                elif part_type == "output_text":
+                if part_type in {"text", "input_text", "output_text"}:
                     converted_parts.append(OpenAIResponsesModel._build_text_content(role, part.get("text", "")))
                 elif part_type == "image_url":
                     image_info = part.get("image_url", {})
