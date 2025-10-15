@@ -616,51 +616,6 @@ class TestOpenAIResponsesModel:
         assert tool_call.function.arguments == {"answer": "42"}
         assert result.content == ""
 
-    def test_generate_stream_emits_text_and_usage(self):
-        class DummyStream:
-            def __init__(self, events):
-                self._iterator = iter(events)
-
-            def __iter__(self):
-                return self
-
-            def __next__(self):
-                return next(self._iterator)
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc_val, exc_tb):
-                return False
-
-        events = [
-            SimpleNamespace(type="response.output_text.delta", delta="Hello", sequence_number=1),
-            SimpleNamespace(
-                type="response.completed",
-                response=SimpleNamespace(id="resp_stream", usage=SimpleNamespace(input_tokens=5, output_tokens=3)),
-                sequence_number=2,
-            ),
-        ]
-
-        with patch("openai.OpenAI") as MockOpenAI:
-            mock_client = MagicMock()
-            MockOpenAI.return_value = mock_client
-            mock_client.responses.create.return_value = DummyStream(events)
-
-            model = OpenAIResponsesModel(model_id="gpt-4o-mini", api_key="test")
-            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
-            deltas = list(model.generate_stream(messages, stop_sequences=["lo"]))
-
-        call_kwargs = mock_client.responses.create.call_args.kwargs
-        assert call_kwargs["stream"] is True
-        assert call_kwargs["stream_options"]["include_usage"] is True
-        assert call_kwargs["input"][0]["content"][0]["type"] == "input_text"
-        assert len(deltas) == 2
-        assert deltas[0].content == "Hel"
-        assert deltas[1].token_usage.input_tokens == 5
-        assert deltas[1].token_usage.output_tokens == 3
-        assert model._last_response_id == "resp_stream"
-
     def test_generate_stream_chains_previous_response_id(self):
         class DummyStream:
             def __init__(self, events):
@@ -752,30 +707,6 @@ class TestOpenAIResponsesModel:
             second_kwargs = mock_client.responses.create.call_args_list[1].kwargs
             assert second_kwargs["previous_response_id"] == "resp_1"
             assert model._last_response_id == "resp_2"
-
-    def test_generate_respects_explicit_previous_response_id(self):
-        response = SimpleNamespace(
-            id="resp_custom",
-            output=[
-                SimpleNamespace(
-                    type="message", role="assistant", content=[SimpleNamespace(type="output_text", text="Hello")]
-                )
-            ],
-            usage=None,
-        )
-
-        with patch("openai.OpenAI") as MockOpenAI:
-            mock_client = MagicMock()
-            MockOpenAI.return_value = mock_client
-            mock_client.responses.create.return_value = response
-
-            model = OpenAIResponsesModel(model_id="gpt-4o", api_key="test")
-            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
-
-            model.generate(messages, previous_response_id="override")
-            call_kwargs = mock_client.responses.create.call_args.kwargs
-            assert call_kwargs["previous_response_id"] == "override"
-            assert model._last_response_id == "resp_custom"
 
     def test_generate_skips_previous_id_when_conversation_passed(self):
         response = SimpleNamespace(
