@@ -475,6 +475,9 @@ You have been provided with these additional arguments, that you can access dire
         if reset:
             self.memory.reset()
             self.monitor.reset()
+            reset_model_conversation = getattr(self.model, "reset_conversation", None)
+            if callable(reset_model_conversation):
+                reset_model_conversation()
 
         self.logger.log_task(
             content=self.task.strip(),

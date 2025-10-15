@@ -661,6 +661,58 @@ class TestOpenAIResponsesModel:
         assert deltas[1].token_usage.output_tokens == 3
         assert model._last_response_id == "resp_stream"
 
+    def test_generate_stream_chains_previous_response_id(self):
+        class DummyStream:
+            def __init__(self, events):
+                self._iterator = iter(events)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self._iterator)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                return False
+
+        first_events = [
+            SimpleNamespace(type="response.output_text.delta", delta="Hello", sequence_number=1),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(id="resp_stream_1", usage=SimpleNamespace(input_tokens=4, output_tokens=2)),
+                sequence_number=2,
+            ),
+        ]
+        second_events = [
+            SimpleNamespace(type="response.output_text.delta", delta="World", sequence_number=1),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(id="resp_stream_2", usage=SimpleNamespace(input_tokens=3, output_tokens=5)),
+                sequence_number=2,
+            ),
+        ]
+
+        with patch("openai.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.responses.create.side_effect = [DummyStream(first_events), DummyStream(second_events)]
+
+            model = OpenAIResponsesModel(model_id="gpt-4o-mini", api_key="test")
+            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
+
+            list(model.generate_stream(messages))
+            first_kwargs = mock_client.responses.create.call_args_list[0].kwargs
+            assert "previous_response_id" not in first_kwargs
+            assert model._last_response_id == "resp_stream_1"
+
+            list(model.generate_stream(messages))
+            second_kwargs = mock_client.responses.create.call_args_list[1].kwargs
+            assert second_kwargs["previous_response_id"] == "resp_stream_1"
+            assert model._last_response_id == "resp_stream_2"
+
     def test_generate_chains_previous_response_id(self):
         responses = [
             SimpleNamespace(
