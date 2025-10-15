@@ -144,7 +144,7 @@ print(model(messages))
 
 ### OpenAIServerModel
 
-This class lets you call any OpenAI-compatible server that exposes the legacy Chat Completions API.
+This class lets you call any OpenAI-compatible server that exposes the Chat Completions API.
 Here's how you can set it (you can customise the `api_base` url to point to another server):
 ```py
 import os
@@ -201,11 +201,11 @@ You can also call `model.reset_conversation()` to clear the cached response ID w
 
 ### AzureOpenAIServerModel
 
-`AzureOpenAIServerModel` allows you to connect to any Azure OpenAI deployment. 
+`AzureOpenAIServerModel` allows you to connect to any Azure OpenAI deployment.
 
 Below you can find an example of how to set it up, note that you can omit the `azure_endpoint`, `api_key`, and `api_version` arguments, provided you've set the corresponding environment variables -- `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, and `OPENAI_API_VERSION`.
 
-Pay attention to the lack of an `AZURE_` prefix for `OPENAI_API_VERSION`, this is due to the way the underlying [openai](https://github.com/openai/openai-python) package is designed. 
+Pay attention to the lack of an `AZURE_` prefix for `OPENAI_API_VERSION`, this is due to the way the underlying [openai](https://github.com/openai/openai-python) package is designed.
 
 ```py
 import os
@@ -216,7 +216,7 @@ model = AzureOpenAIServerModel(
     model_id = os.environ.get("AZURE_OPENAI_MODEL"),
     azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
     api_key=os.environ.get("AZURE_OPENAI_API_KEY"),
-    api_version=os.environ.get("OPENAI_API_VERSION")    
+    api_version=os.environ.get("OPENAI_API_VERSION")
 )
 ```
 
