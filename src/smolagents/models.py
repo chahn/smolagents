@@ -440,6 +440,10 @@ class Model:
     def supports_stop_parameter(self) -> bool:
         return supports_stop_parameter(self.model_id or "")
 
+    def reset_conversation(self) -> None:
+        """Reset any cached conversation state kept by the model."""
+        return None
+
     def _prepare_completion_kwargs(
         self,
         messages: list[ChatMessage | dict],
@@ -2150,6 +2154,7 @@ class OpenAIResponsesModel(ApiModel):
 
     def reset_conversation(self):
         """Clear any cached response id so the next call starts a fresh conversation."""
+        super().reset_conversation()
         self._last_response_id = None
 
 

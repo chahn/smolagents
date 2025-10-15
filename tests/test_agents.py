@@ -40,6 +40,7 @@ from smolagents.agents import (
     AgentError,
     AgentMaxStepsError,
     AgentToolCallError,
+    ActionOutput,
     CodeAgent,
     MultiStepAgent,
     RunResult,
@@ -494,6 +495,38 @@ class TestAgent:
         output = agent.run("What is 2 multiplied by 3.6452?", reset=True)
         assert output == 7.2904
         assert len(agent.memory.steps) == 3
+
+    def test_run_resets_model_conversation_when_requested(self):
+        class TrackingModel(Model):
+            def __init__(self):
+                super().__init__(model_id="tracking")
+                self.reset_calls: int = 0
+
+            def generate(self, messages, stop_sequences=None, tools_to_call_from=None):
+                return ChatMessage(role=MessageRole.ASSISTANT, content="Done")
+
+            def reset_conversation(self):
+                super().reset_conversation()
+                self.reset_calls += 1
+
+        class SimpleAgent(MultiStepAgent):
+            def initialize_system_prompt(self) -> str:
+                return ""
+
+            def _step_stream(self, memory_step):
+                yield ActionOutput(output="Done", is_final_answer=True)
+
+        model = TrackingModel()
+        agent = SimpleAgent(tools=[], model=model)
+
+        agent.run("Task one", reset=True)
+        assert model.reset_calls == 1
+
+        agent.run("Task two", reset=False)
+        assert model.reset_calls == 1
+
+        agent.run("Task three", reset=True)
+        assert model.reset_calls == 2
 
     def test_setup_agent_with_empty_toolbox(self):
         ToolCallingAgent(model=FakeToolCallModel(), tools=[])
