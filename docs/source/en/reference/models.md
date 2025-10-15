@@ -195,7 +195,7 @@ response = model.generate(messages)
 print(response.content)
 ```
 
-You can also call `model.reset_conversation()` to clear the cached response ID when you need a fresh Responses API conversation.
+The cached response ID is reused automatically on subsequent calls so the model can build on its previous reasoning. When you want a fresh conversation, either call `model.reset_conversation()` directly or, if you are driving the model through an agent, pass `reset=True` to `agent.run(...)` to clear the stored state for the next run.
 
 [[autodoc]] OpenAIResponsesModel
 
