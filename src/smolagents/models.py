@@ -1926,10 +1926,14 @@ class OpenAIResponsesModel(ApiModel):
                     image_info = part.get("image_url", {})
                     image_url: str | None = None
                     detail: str | None = None
+                    file_id: str | None = None
+                    mime_type: str | None = part.get("mime_type")
+
                     if isinstance(image_info, dict):
                         image_url = image_info.get("url")
                         detail = image_info.get("detail")
-                        mime_type = image_info.get("mime_type") or part.get("mime_type")
+                        file_id = image_info.get("file_id")
+                        mime_type = image_info.get("mime_type") or mime_type
                         if image_url is None:
                             b64_json = image_info.get("b64_json")
                             if b64_json is not None:
@@ -1937,15 +1941,26 @@ class OpenAIResponsesModel(ApiModel):
                                 image_url = f"data:{mime_prefix};base64,{b64_json}"
                     else:
                         image_url = image_info
+                        detail = part.get("detail")
+
+                    if image_url is None:
+                        b64_json = part.get("b64_json")
+                        if b64_json is not None:
+                            mime_prefix = mime_type or "image/png"
+                            image_url = f"data:{mime_prefix};base64,{b64_json}"
+
                     if image_url is None:
                         raise ValueError("Responses API image parts must include a 'url' or 'b64_json' field.")
-                    converted_parts.append(
-                        {
-                            "type": "input_image",
-                            "image_url": image_url,
-                            "detail": detail or "auto",
-                        }
-                    )
+
+                    payload: dict[str, Any] = {
+                        "type": "input_image",
+                        "image_url": image_url,
+                        "detail": detail or part.get("detail") or "auto",
+                    }
+                    if file_id:
+                        payload["file_id"] = file_id
+
+                    converted_parts.append(payload)
                 elif part_type == "input_image":
                     converted_parts.append(part)
                 elif part_type in {"input_file", "file"}:
