@@ -1619,7 +1619,6 @@ class OpenAIModel(ApiModel):
             flatten_messages_as_text=flatten_messages_as_text,
             **kwargs,
         )
-        self._last_response_id: str | None = None
 
     def create_client(self):
         try:
