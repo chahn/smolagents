@@ -37,10 +37,10 @@ from rich.console import Console
 from smolagents import EMPTY_PROMPT_TEMPLATES
 from smolagents.agent_types import AgentImage, AgentText
 from smolagents.agents import (
+    ActionOutput,
     AgentError,
     AgentMaxStepsError,
     AgentToolCallError,
-    ActionOutput,
     CodeAgent,
     MultiStepAgent,
     RunResult,
