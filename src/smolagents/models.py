@@ -1691,7 +1691,55 @@ OpenAIModel = OpenAIServerModel
 
 
 class OpenAIResponsesModel(ApiModel):
-    """Model that uses the OpenAI Responses API instead of legacy chat completions."""
+    """OpenAI Responses API-backed model
+
+    Parameters:
+        model_id (`str`):
+            Identifier of the OpenAI model to call via the Responses API (for example ``"gpt-4o"`` or ``"o4"``).
+        api_base (`str`, *optional*):
+            Custom API base URL; matches the ``api_base`` parameter accepted by ``OpenAIServerModel``.
+        api_key (`str`, *optional*):
+            API key used for authentication, forwarded to ``openai.OpenAI``.
+        organization (`str`, *optional*):
+            OpenAI organization header to attach to each request.
+        project (`str`, *optional*):
+            OpenAI project identifier forwarded to the client.
+        client_kwargs (`dict[str, Any]`, *optional*):
+            Additional keyword arguments passed directly to ``openai.OpenAI``.
+        custom_role_conversions (`dict[str, str]`, *optional*):
+            Per-role overrides (handled client-side) identical to those supported by ``OpenAIServerModel``.
+            The mapping is applied while normalising messages before they reach the API.
+        flatten_messages_as_text (`bool`, default ``False``):
+            Client-side flag that flattens rich content into text prior to invoking the Responses API.
+        **kwargs:
+            Extra keyword arguments sent to :py:meth:`openai.resources.responses.Responses.create`.
+            Supported keys (mirroring the OpenAI Python SDK) include
+            ``background``, ``conversation``, ``include``, ``instructions``, ``max_output_tokens``,
+            ``max_tool_calls``, ``metadata``, ``parallel_tool_calls``, ``previous_response_id``, ``prompt``,
+            ``prompt_cache_key``, ``reasoning``, ``safety_identifier``, ``service_tier``, ``store``,
+            ``stream_options``, ``temperature``, ``text``, ``tool_choice``, ``tools``, ``top_logprobs``,
+            ``top_p``, ``truncation``, and ``user`` — matching the parameters exposed by the OpenAI
+            Responses API.
+
+            The ``reasoning`` parameter accepts dictionaries shaped like
+            :pyclass:`openai.types.shared_params.reasoning.Reasoning`, for example
+            ``{"effort": "medium", "summary": "auto"}``. Valid ``effort`` values are
+            ``"minimal"``, ``"low"``, ``"medium"``, and ``"high"``, while ``summary`` (or the deprecated
+            ``generate_summary``) accepts ``"auto"``, ``"concise"``, or ``"detailed"``.
+
+            The ``text`` parameter follows :pyclass:`openai.types.responses.response_text_config_param.ResponseTextConfigParam`.
+            Provide ``{"verbosity": "low"|"medium"|"high"}`` to control verbosity and optionally set
+            ``"format"`` to ``{"type": "text"}``, ``{"type": "json_object"}``, or the Structured Outputs form
+            ``{"type": "json_schema", "name": "...", "schema": {...}}``.
+
+    Example:
+        >>> model = OpenAIResponsesModel(model_id="gpt-5", api_key="sk-...")
+        >>> model.generate(
+        ...     [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Summarise our meeting."}])],
+        ...     reasoning={"effort": "medium"},
+        ...     text={"verbosity": "high"},
+        ... )
+    """
 
     _ALLOWED_RESPONSE_PARAMS = {
         "background",
