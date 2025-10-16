@@ -1873,12 +1873,14 @@ class OpenAIResponsesModel(ApiModel):
         response_kwargs: dict[str, Any] = {"model": self.model_id}
         if stream:
             response_kwargs["stream"] = True
-            merged_stream_options = {"include_usage": True}
             if stream_options:
-                merged_stream_options.update(stream_options)
-            response_kwargs["stream_options"] = merged_stream_options
+                response_kwargs["stream_options"] = stream_options
         elif stream_options:
             raise ValueError("`stream_options` can only be set when streaming is enabled.")
+
+        tools_payload = completion_kwargs.pop("tools", None)
+        if tools_payload:
+            completion_kwargs["tools"] = self._convert_tools_for_responses(tools_payload)
 
         for key, value in completion_kwargs.items():
             if key == "max_tokens":
@@ -1890,7 +1892,9 @@ class OpenAIResponsesModel(ApiModel):
 
         response_kwargs["input"] = self._convert_messages_to_input(messages_payload)
         if response_format_payload is not None:
-            response_kwargs["text"] = {"format": response_format_payload}
+            converted_text_config = self._convert_response_format(response_format_payload)
+            if converted_text_config:
+                response_kwargs["text"] = converted_text_config
         cached_response_id = getattr(self, "_last_response_id", None)
         if (
             "previous_response_id" not in response_kwargs
@@ -2067,7 +2071,7 @@ class OpenAIResponsesModel(ApiModel):
             **kwargs,
         )
         self._apply_rate_limit()
-        response = self.client.responses.create(**response_kwargs)
+        response = self.retryer(self.client.responses.create, **response_kwargs)
         self._last_response_id = getattr(response, "id", None) or getattr(self, "_last_response_id", None)
         return self._convert_response_to_chat_message(response, stop_sequences=stop_sequences)
 
@@ -2092,7 +2096,8 @@ class OpenAIResponsesModel(ApiModel):
         accumulated_text = ""
         filtered_text = ""
         latest_response_id: str | None = getattr(self, "_last_response_id", None)
-        with self.client.responses.create(**response_kwargs) as stream:
+        stream_context = self.retryer(self.client.responses.create, **response_kwargs)
+        with stream_context as stream:
             for event in stream:
                 event_type = getattr(event, "type", "")
                 if event_type == "response.output_text.delta":
@@ -2195,6 +2200,52 @@ class OpenAIResponsesModel(ApiModel):
         """Clear any cached response id so the next call starts a fresh conversation."""
         super().reset_conversation()
         self._last_response_id = None
+
+    @staticmethod
+    def _convert_tools_for_responses(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        converted_tools: list[dict[str, Any]] = []
+        for tool in tools:
+            if tool.get("type") != "function":
+                converted_tools.append(tool)
+                continue
+            function_details = tool.get("function") or {}
+            converted_tool: dict[str, Any] = {
+                "type": "function",
+                "name": function_details.get("name"),
+                "parameters": function_details.get("parameters"),
+            }
+            if "description" in function_details:
+                converted_tool["description"] = function_details["description"]
+            if function_details.get("strict") is not None:
+                converted_tool["strict"] = function_details["strict"]
+            converted_tools.append(converted_tool)
+        return converted_tools
+
+    @staticmethod
+    def _convert_response_format(response_format: dict[str, Any]) -> dict[str, Any] | None:
+        if not response_format:
+            return None
+        verbosity = response_format.get("verbosity")
+        format_payload: dict[str, Any]
+        format_type = response_format.get("type")
+        if format_type == "json_schema":
+            schema_details = response_format.get("json_schema", {})
+            format_payload = {
+                "type": "json_schema",
+                "name": schema_details.get("name"),
+                "schema": schema_details.get("schema"),
+            }
+            if schema_details.get("description") is not None:
+                format_payload["description"] = schema_details["description"]
+            if schema_details.get("strict") is not None:
+                format_payload["strict"] = schema_details["strict"]
+        else:
+            format_payload = {key: value for key, value in response_format.items() if key != "verbosity"}
+        format_payload = {key: value for key, value in format_payload.items() if value is not None}
+        text_config: dict[str, Any] = {"format": format_payload}
+        if verbosity is not None:
+            text_config["verbosity"] = verbosity
+        return text_config
 
 
 class AzureOpenAIModel(OpenAIModel):

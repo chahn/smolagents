@@ -44,7 +44,7 @@ from smolagents.models import (
     remove_content_after_stop_sequences,
     supports_stop_parameter,
 )
-from smolagents.tools import tool
+from smolagents.tools import Tool, tool
 
 from .utils.markers import require_run_all
 
@@ -574,6 +574,41 @@ class TestOpenAIModel:
 
 
 class TestOpenAIResponsesModel:
+    def test_tool_payload_conversion(self):
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "my_tool",
+                    "description": "does something",
+                    "parameters": {"type": "object"},
+                    "strict": True,
+                },
+            }
+        ]
+        converted = OpenAIResponsesModel._convert_tools_for_responses(tools)
+        assert converted == [
+            {
+                "type": "function",
+                "name": "my_tool",
+                "description": "does something",
+                "parameters": {"type": "object"},
+                "strict": True,
+            }
+        ]
+
+    def test_response_format_conversion_json_schema(self):
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "MyFormat", "schema": {"type": "object"}, "strict": True},
+            "verbosity": "medium",
+        }
+        converted = OpenAIResponsesModel._convert_response_format(response_format)
+        assert converted == {
+            "format": {"type": "json_schema", "name": "MyFormat", "schema": {"type": "object"}, "strict": True},
+            "verbosity": "medium",
+        }
+
     def test_client_kwargs_passed_correctly(self):
         model_id = "gpt-4o"
         api_base = "https://api.openai.com/v1"
@@ -660,6 +695,58 @@ class TestOpenAIResponsesModel:
         assert tool_call.function.arguments == {"answer": "42"}
         assert result.content == ""
 
+    def test_generate_includes_converted_tools_and_structured_output(self):
+        response = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    content=[SimpleNamespace(type="output_text", text="42")],
+                )
+            ],
+            usage=None,
+        )
+
+        class SimpleTool(Tool):
+            name = "answer"
+            description = "Return an answer."
+            inputs = {"question": {"type": "string", "description": "Prompt"}}
+            output_type = "string"
+
+            def forward(self, question):
+                return "42"
+
+        with patch("openai.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.responses.create.return_value = response
+
+            model = OpenAIResponsesModel(model_id="gpt-4o-mini", api_key="test")
+            tool = SimpleTool()
+            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {"name": "Result", "schema": {"type": "object"}},
+            }
+            model.generate(messages, tools_to_call_from=[tool], response_format=response_format)
+
+        call_kwargs = mock_client.responses.create.call_args.kwargs
+        tool_payload = call_kwargs["tools"][0]
+        assert tool_payload == {
+            "type": "function",
+            "name": "answer",
+            "description": "Return an answer.",
+            "parameters": {
+                "type": "object",
+                "properties": {"question": {"type": "string", "description": "Prompt"}},
+                "required": ["question"],
+            },
+        }
+        assert "function" not in tool_payload
+        assert call_kwargs["text"]["format"]["type"] == "json_schema"
+        assert call_kwargs["text"]["format"]["name"] == "Result"
+        assert call_kwargs["text"]["format"]["schema"] == {"type": "object"}
+
     def test_generate_stream_chains_previous_response_id(self):
         class DummyStream:
             def __init__(self, events):
@@ -705,6 +792,7 @@ class TestOpenAIResponsesModel:
             list(model.generate_stream(messages))
             first_kwargs = mock_client.responses.create.call_args_list[0].kwargs
             assert "previous_response_id" not in first_kwargs
+            assert "stream_options" not in first_kwargs
             assert model._last_response_id == "resp_stream_1"
 
             list(model.generate_stream(messages))
