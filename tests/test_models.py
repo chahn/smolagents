@@ -712,7 +712,7 @@ class TestOpenAIResponsesModel:
         model.register_tool_output(tool_output)
 
         messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
-        response_kwargs = model._prepare_response_kwargs(messages=messages)
+        response_kwargs, call_context = model._prepare_response_kwargs(messages=messages)
 
         assert response_kwargs["previous_response_id"] == "resp_initial"
         assert response_kwargs["input"][0]["role"] == MessageRole.USER.value
@@ -723,20 +723,94 @@ class TestOpenAIResponsesModel:
             "output": "Observation: Example Domain",
         }
 
-        second_kwargs = model._prepare_response_kwargs(messages=messages)
+        model._finalize_responses_submission(call_context, success=True)
+
+        second_kwargs, second_context = model._prepare_response_kwargs(messages=messages)
         assert second_kwargs["input"] == []
+        model._finalize_responses_submission(second_context, success=True)
 
         follow_up_messages = [
             ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}]),
             ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Another prompt"}]),
         ]
-        third_kwargs = model._prepare_response_kwargs(messages=follow_up_messages)
+        third_kwargs, _ = model._prepare_response_kwargs(messages=follow_up_messages)
         assert third_kwargs["input"] == [
             {
                 "role": MessageRole.USER.value,
                 "content": [{"type": "input_text", "text": "Ping\nAnother prompt"}],
             }
         ]
+
+    def test_generate_preserves_tool_outputs_on_failure(self):
+        with patch("openai.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.responses.create.side_effect = RuntimeError("boom")
+
+            model = OpenAIResponsesModel(model_id="gpt-4o-mini", api_key="test", retry=False)
+            tool_call = ToolCall(id="call_pending", name="visit_webpage", arguments={"url": "https://example.com"})
+            tool_output = ToolOutput(
+                id="call_pending",
+                output="Example Domain",
+                is_final_answer=False,
+                observation="Observation: Example Domain",
+                tool_call=tool_call,
+            )
+            model.register_tool_output(tool_output)
+
+            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
+
+            with pytest.raises(RuntimeError):
+                model.generate(messages)
+
+        assert model._pending_tool_outputs == [
+            {"call_id": "call_pending", "output": "Observation: Example Domain"}
+        ]
+        assert "call_pending" not in model._submitted_tool_outputs
+        assert model._submitted_input_snapshot == []
+
+    def test_generate_clears_tool_outputs_after_success(self):
+        response = SimpleNamespace(
+            id="resp_success",
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    content=[SimpleNamespace(type="output_text", text="Done")],
+                )
+            ],
+            usage=None,
+        )
+
+        with patch("openai.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.responses.create.return_value = response
+
+            model = OpenAIResponsesModel(model_id="gpt-4o-mini", api_key="test", retry=False)
+            tool_call = ToolCall(id="call_pending", name="visit_webpage", arguments={"url": "https://example.com"})
+            tool_output = ToolOutput(
+                id="call_pending",
+                output="Example Domain",
+                is_final_answer=False,
+                observation="Observation: Example Domain",
+                tool_call=tool_call,
+            )
+            model.register_tool_output(tool_output)
+
+            messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
+
+            model.generate(messages)
+
+        assert model._pending_tool_outputs == []
+        assert "call_pending" in model._submitted_tool_outputs
+        assert mock_client.responses.create.call_args is not None
+        request_input = mock_client.responses.create.call_args.kwargs["input"]
+        assert any(part.get("type") == "function_call_output" for part in request_input)
+        assert request_input[-1]["call_id"] == "call_pending"
+        assert request_input[-1]["output"] == "Observation: Example Domain"
+        assert request_input[0]["role"] == MessageRole.USER.value
+        assert model._submitted_input_snapshot[-1]["call_id"] == "call_pending"
 
     def test_generate_includes_converted_tools_and_structured_output(self):
         response = SimpleNamespace(
