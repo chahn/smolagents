@@ -763,9 +763,7 @@ class TestOpenAIResponsesModel:
             with pytest.raises(RuntimeError):
                 model.generate(messages)
 
-        assert model._pending_tool_outputs == [
-            {"call_id": "call_pending", "output": "Observation: Example Domain"}
-        ]
+        assert model._pending_tool_outputs == [{"call_id": "call_pending", "output": "Observation: Example Domain"}]
         assert "call_pending" not in model._submitted_tool_outputs
         assert model._submitted_input_snapshot == []
 

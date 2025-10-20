@@ -1988,9 +1988,7 @@ class OpenAIResponsesModel(ApiModel):
                 call_ids = call_context.call_ids_sent
                 self._submitted_tool_outputs.update(call_ids)
                 self._pending_tool_outputs = [
-                    pending
-                    for pending in self._pending_tool_outputs
-                    if pending.get("call_id") not in call_ids
+                    pending for pending in self._pending_tool_outputs if pending.get("call_id") not in call_ids
                 ]
             self._submitted_input_snapshot = call_context.input_snapshot
 
@@ -2265,7 +2263,11 @@ class OpenAIResponsesModel(ApiModel):
                     elif event_type == "response.function_call.arguments.done":
                         state = tool_call_state.setdefault(
                             event.output_index,
-                            {"arguments": "", "name": getattr(event, "name", None), "id": getattr(event, "item_id", None)},
+                            {
+                                "arguments": "",
+                                "name": getattr(event, "name", None),
+                                "id": getattr(event, "item_id", None),
+                            },
                         )
                         state["arguments"] = getattr(event, "arguments", state.get("arguments", ""))
                         state["name"] = getattr(event, "name", state.get("name"))
