@@ -32,6 +32,8 @@ from .utils import RateLimiter, Retrying, _is_package_available, encode_image_ba
 if TYPE_CHECKING:
     from transformers import StoppingCriteriaList
 
+    from smolagents.agents import ToolOutput
+
 
 logger = logging.getLogger(__name__)
 
@@ -1626,6 +1628,9 @@ class OpenAIModel(ApiModel):
             "organization": organization,
             "project": project,
         }
+        self._pending_tool_outputs: list[dict[str, Any]] = []
+        self._submitted_tool_outputs: set[str] = set()
+        self._submitted_input_snapshot: list[dict[str, Any]] = []
         super().__init__(
             model_id=model_id,
             custom_role_conversions=custom_role_conversions,
@@ -1832,6 +1837,9 @@ class OpenAIResponsesModel(ApiModel):
             "organization": organization,
             "project": project,
         }
+        self._pending_tool_outputs: list[dict[str, Any]] = []
+        self._submitted_tool_outputs: set[str] = set()
+        self._submitted_input_snapshot: list[dict[str, Any]] = []
         super().__init__(
             model_id=model_id,
             custom_role_conversions=custom_role_conversions,
@@ -1900,10 +1908,21 @@ class OpenAIResponsesModel(ApiModel):
                 logger.debug("Dropping unsupported Responses API parameter '%s'", key)
 
         response_kwargs["input"] = self._convert_messages_to_input(messages_payload)
+        if self._pending_tool_outputs:
+            for pending in self._pending_tool_outputs:
+                call_id = pending.get("call_id")
+                output_text = pending.get("output")
+                if not call_id or output_text is None:
+                    continue
+                response_kwargs["input"].append(
+                    {"type": "function_call_output", "call_id": call_id, "output": output_text}
+                )
+            self._pending_tool_outputs = []
         if response_format_payload is not None:
             converted_text_config = self._convert_response_format(response_format_payload)
             if converted_text_config:
                 response_kwargs["text"] = converted_text_config
+        full_input = response_kwargs["input"]
         cached_response_id = getattr(self, "_last_response_id", None)
         if (
             "previous_response_id" not in response_kwargs
@@ -1911,6 +1930,38 @@ class OpenAIResponsesModel(ApiModel):
             and cached_response_id
         ):
             response_kwargs["previous_response_id"] = cached_response_id
+
+        incremental_start_index = 0
+        has_server_history = "previous_response_id" in response_kwargs or "conversation" in response_kwargs
+        if has_server_history and self._submitted_input_snapshot:
+            max_prefix = min(len(full_input), len(self._submitted_input_snapshot))
+            while (
+                incremental_start_index < max_prefix
+                and full_input[incremental_start_index] == self._submitted_input_snapshot[incremental_start_index]
+            ):
+                incremental_start_index += 1
+        incremental_inputs = full_input[incremental_start_index:]
+
+        filtered_input: list[dict[str, Any]] = []
+        for item in incremental_inputs:
+            if not isinstance(item, dict):
+                filtered_input.append(item)
+                continue
+            item_type = item.get("type")
+            if item_type == "function_call_output":
+                call_id = item.get("call_id")
+                if call_id:
+                    if call_id in self._submitted_tool_outputs:
+                        continue
+                    self._submitted_tool_outputs.add(call_id)
+                filtered_input.append(item)
+                continue
+            role = item.get("role")
+            if has_server_history and role == MessageRole.ASSISTANT.value:
+                continue
+            filtered_input.append(item)
+        response_kwargs["input"] = filtered_input
+        self._submitted_input_snapshot = deepcopy(full_input)
         return response_kwargs
 
     @staticmethod
@@ -1919,6 +1970,8 @@ class OpenAIResponsesModel(ApiModel):
         for message in messages:
             role = message.get("role")
             content = message.get("content")
+            if role == MessageRole.TOOL_RESPONSE or role == MessageRole.TOOL_RESPONSE.value:
+                continue
             if isinstance(content, str):
                 converted_messages.append(
                     {
@@ -2008,7 +2061,7 @@ class OpenAIResponsesModel(ApiModel):
             if getattr(output, "type", None) != "function_call":
                 continue
             arguments = parse_json_if_needed(getattr(output, "arguments", ""))
-            call_id = getattr(output, "id", None) or getattr(output, "call_id", "")
+            call_id = getattr(output, "call_id", None) or getattr(output, "id", None) or ""
             tool_calls.append(
                 ChatMessageToolCall(
                     function=ChatMessageToolCallFunction(
@@ -2209,6 +2262,25 @@ class OpenAIResponsesModel(ApiModel):
         """Clear any cached response id so the next call starts a fresh conversation."""
         super().reset_conversation()
         self._last_response_id = None
+        self._pending_tool_outputs = []
+        self._submitted_tool_outputs = set()
+        self._submitted_input_snapshot = []
+
+    def register_tool_output(self, tool_output: "ToolOutput") -> None:
+        call_id = getattr(tool_output, "id", None)
+        if not call_id:
+            return
+        if call_id in self._submitted_tool_outputs:
+            return
+        if tool_output.is_final_answer and isinstance(tool_output.output, str):
+            payload = tool_output.output
+        elif getattr(tool_output, "observation", None):
+            payload = tool_output.observation
+        elif tool_output.output is not None:
+            payload = str(tool_output.output)
+        else:
+            payload = ""
+        self._pending_tool_outputs.append({"call_id": call_id, "output": payload})
 
     @staticmethod
     def _convert_tools_for_responses(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

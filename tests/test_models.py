@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from huggingface_hub import ChatCompletionOutputMessage
 
+from smolagents.agents import ToolCall, ToolOutput
 from smolagents.default_tools import FinalAnswerTool
 from smolagents.models import (
     AmazonBedrockModel,
@@ -694,6 +695,48 @@ class TestOpenAIResponsesModel:
         assert tool_call.function.name == "final_answer"
         assert tool_call.function.arguments == {"answer": "42"}
         assert result.content == ""
+
+    def test_register_tool_output_appends_function_output(self):
+        model = OpenAIResponsesModel(model_id="gpt-4o-mini", api_key="test")
+        model._last_response_id = "resp_initial"
+
+        tool_call = ToolCall(id="call_pending", name="visit_webpage", arguments={"url": "https://example.com"})
+        tool_output = ToolOutput(
+            id="call_pending",
+            output="Example Domain",
+            is_final_answer=False,
+            observation="Observation: Example Domain",
+            tool_call=tool_call,
+        )
+
+        model.register_tool_output(tool_output)
+
+        messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}])]
+        response_kwargs = model._prepare_response_kwargs(messages=messages)
+
+        assert response_kwargs["previous_response_id"] == "resp_initial"
+        assert response_kwargs["input"][0]["role"] == MessageRole.USER.value
+        assert response_kwargs["input"][0]["content"] == [{"type": "input_text", "text": "Ping"}]
+        assert response_kwargs["input"][1] == {
+            "type": "function_call_output",
+            "call_id": "call_pending",
+            "output": "Observation: Example Domain",
+        }
+
+        second_kwargs = model._prepare_response_kwargs(messages=messages)
+        assert second_kwargs["input"] == []
+
+        follow_up_messages = [
+            ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Ping"}]),
+            ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Another prompt"}]),
+        ]
+        third_kwargs = model._prepare_response_kwargs(messages=follow_up_messages)
+        assert third_kwargs["input"] == [
+            {
+                "role": MessageRole.USER.value,
+                "content": [{"type": "input_text", "text": "Ping\nAnother prompt"}],
+            }
+        ]
 
     def test_generate_includes_converted_tools_and_structured_output(self):
         response = SimpleNamespace(
