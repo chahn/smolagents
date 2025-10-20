@@ -1397,6 +1397,8 @@ class ToolCallingAgent(MultiStepAgent):
             tool_call = list(parallel_calls.values())[0]
             tool_output = process_single_tool_call(tool_call)
             outputs[tool_output.id] = tool_output
+            if hasattr(self.model, "register_tool_output"):
+                self.model.register_tool_output(tool_output)
             yield tool_output
         else:
             # If multiple tool calls, process them in parallel
@@ -1407,6 +1409,8 @@ class ToolCallingAgent(MultiStepAgent):
                 for future in as_completed(futures):
                     tool_output = future.result()
                     outputs[tool_output.id] = tool_output
+                    if hasattr(self.model, "register_tool_output"):
+                        self.model.register_tool_output(tool_output)
                     yield tool_output
 
         memory_step.tool_calls = [parallel_calls[k] for k in sorted(parallel_calls.keys())]
