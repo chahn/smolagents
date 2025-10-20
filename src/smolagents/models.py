@@ -1818,6 +1818,11 @@ class OpenAIResponsesModel(ApiModel):
         "user",
     }
 
+    @dataclass
+    class _ResponsesCallContext:
+        call_ids_sent: set[str]
+        input_snapshot: list[dict[str, Any]]
+
     def __init__(
         self,
         model_id: str,
@@ -1871,7 +1876,7 @@ class OpenAIResponsesModel(ApiModel):
         *,
         stream: bool = False,
         **kwargs,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], "OpenAIResponsesModel._ResponsesCallContext"]:
         completion_kwargs = super()._prepare_completion_kwargs(
             messages=messages,
             stop_sequences=stop_sequences,
@@ -1908,16 +1913,19 @@ class OpenAIResponsesModel(ApiModel):
                 logger.debug("Dropping unsupported Responses API parameter '%s'", key)
 
         response_kwargs["input"] = self._convert_messages_to_input(messages_payload)
+        existing_submitted = set(self._submitted_tool_outputs)
+        call_ids_sent: set[str] = set()
         if self._pending_tool_outputs:
             for pending in self._pending_tool_outputs:
                 call_id = pending.get("call_id")
                 output_text = pending.get("output")
                 if not call_id or output_text is None:
                     continue
+                if call_id in existing_submitted:
+                    continue
                 response_kwargs["input"].append(
                     {"type": "function_call_output", "call_id": call_id, "output": output_text}
                 )
-            self._pending_tool_outputs = []
         if response_format_payload is not None:
             converted_text_config = self._convert_response_format(response_format_payload)
             if converted_text_config:
@@ -1951,9 +1959,10 @@ class OpenAIResponsesModel(ApiModel):
             if item_type == "function_call_output":
                 call_id = item.get("call_id")
                 if call_id:
-                    if call_id in self._submitted_tool_outputs:
+                    if call_id in existing_submitted:
                         continue
-                    self._submitted_tool_outputs.add(call_id)
+                    existing_submitted.add(call_id)
+                    call_ids_sent.add(call_id)
                 filtered_input.append(item)
                 continue
             role = item.get("role")
@@ -1961,8 +1970,29 @@ class OpenAIResponsesModel(ApiModel):
                 continue
             filtered_input.append(item)
         response_kwargs["input"] = filtered_input
-        self._submitted_input_snapshot = deepcopy(full_input)
-        return response_kwargs
+        call_context = self._ResponsesCallContext(
+            call_ids_sent=call_ids_sent,
+            input_snapshot=deepcopy(full_input),
+        )
+        return response_kwargs, call_context
+
+    def _finalize_responses_submission(
+        self,
+        call_context: _ResponsesCallContext | None,
+        success: bool,
+    ) -> None:
+        if not call_context:
+            return
+        if success:
+            if call_context.call_ids_sent:
+                call_ids = call_context.call_ids_sent
+                self._submitted_tool_outputs.update(call_ids)
+                self._pending_tool_outputs = [
+                    pending
+                    for pending in self._pending_tool_outputs
+                    if pending.get("call_id") not in call_ids
+                ]
+            self._submitted_input_snapshot = call_context.input_snapshot
 
     @staticmethod
     def _convert_messages_to_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2124,7 +2154,7 @@ class OpenAIResponsesModel(ApiModel):
         tools_to_call_from: list[Tool] | None = None,
         **kwargs,
     ) -> ChatMessage:
-        response_kwargs = self._prepare_response_kwargs(
+        response_kwargs, call_context = self._prepare_response_kwargs(
             messages=messages,
             stop_sequences=stop_sequences,
             response_format=response_format,
@@ -2133,7 +2163,12 @@ class OpenAIResponsesModel(ApiModel):
             **kwargs,
         )
         self._apply_rate_limit()
-        response = self.retryer(self.client.responses.create, **response_kwargs)
+        try:
+            response = self.retryer(self.client.responses.create, **response_kwargs)
+        except Exception:
+            self._finalize_responses_submission(call_context, success=False)
+            raise
+        self._finalize_responses_submission(call_context, success=True)
         self._last_response_id = getattr(response, "id", None) or getattr(self, "_last_response_id", None)
         return self._convert_response_to_chat_message(response, stop_sequences=stop_sequences)
 
@@ -2145,7 +2180,7 @@ class OpenAIResponsesModel(ApiModel):
         tools_to_call_from: list[Tool] | None = None,
         **kwargs,
     ) -> Generator[ChatMessageStreamDelta]:
-        response_kwargs = self._prepare_response_kwargs(
+        response_kwargs, call_context = self._prepare_response_kwargs(
             messages=messages,
             stop_sequences=stop_sequences,
             response_format=response_format,
@@ -2158,103 +2193,112 @@ class OpenAIResponsesModel(ApiModel):
         accumulated_text = ""
         filtered_text = ""
         latest_response_id: str | None = getattr(self, "_last_response_id", None)
-        stream_context = self.retryer(self.client.responses.create, **response_kwargs)
-        with stream_context as stream:
-            for event in stream:
-                event_type = getattr(event, "type", "")
-                if event_type == "response.output_text.delta":
-                    delta = getattr(event, "delta", "")
-                    accumulated_text += delta
-                    if stop_sequences:
-                        trimmed = remove_content_after_stop_sequences(accumulated_text, stop_sequences)
-                        delta_to_emit = trimmed[len(filtered_text) :]
-                        filtered_text = trimmed
-                        if delta_to_emit:
-                            yield ChatMessageStreamDelta(content=delta_to_emit)
-                    else:
-                        yield ChatMessageStreamDelta(content=delta)
-                elif (
-                    event_type == "response.output_item.added"
-                    and getattr(getattr(event, "item", None), "type", None) == "function_call"
-                ):
-                    item = event.item
-                    state = tool_call_state.setdefault(
-                        event.output_index,
-                        {
-                            "arguments": "",
-                            "name": getattr(item, "name", None),
-                            "id": getattr(item, "id", None) or getattr(item, "call_id", None),
-                        },
-                    )
-                    state["name"] = getattr(item, "name", state.get("name"))
-                    state["id"] = state.get("id") or getattr(item, "id", None) or getattr(item, "call_id", None)
-                    yield ChatMessageStreamDelta(
-                        tool_calls=[
-                            ChatMessageToolCallStreamDelta(
-                                index=event.output_index,
-                                id=state.get("id"),
-                                type="function",
-                                function=ChatMessageToolCallFunction(
-                                    name=state.get("name") or "",
-                                    arguments=state.get("arguments", ""),
-                                ),
-                            )
-                        ]
-                    )
-                elif event_type == "response.function_call.arguments.delta":
-                    state = tool_call_state.setdefault(
-                        event.output_index,
-                        {"arguments": "", "name": None, "id": getattr(event, "item_id", None)},
-                    )
-                    state["arguments"] += getattr(event, "delta", "")
-                    state["id"] = state.get("id") or getattr(event, "item_id", None)
-                    yield ChatMessageStreamDelta(
-                        tool_calls=[
-                            ChatMessageToolCallStreamDelta(
-                                index=event.output_index,
-                                id=state.get("id"),
-                                type="function",
-                                function=ChatMessageToolCallFunction(
-                                    name=state.get("name") or "",
-                                    arguments=state.get("arguments", ""),
-                                ),
-                            )
-                        ]
-                    )
-                elif event_type == "response.function_call.arguments.done":
-                    state = tool_call_state.setdefault(
-                        event.output_index,
-                        {"arguments": "", "name": getattr(event, "name", None), "id": getattr(event, "item_id", None)},
-                    )
-                    state["arguments"] = getattr(event, "arguments", state.get("arguments", ""))
-                    state["name"] = getattr(event, "name", state.get("name"))
-                    state["id"] = state.get("id") or getattr(event, "item_id", None)
-                    yield ChatMessageStreamDelta(
-                        tool_calls=[
-                            ChatMessageToolCallStreamDelta(
-                                index=event.output_index,
-                                id=state.get("id"),
-                                type="function",
-                                function=ChatMessageToolCallFunction(
-                                    name=state.get("name") or "",
-                                    arguments=state.get("arguments", ""),
-                                ),
-                            )
-                        ]
-                    )
-                elif event_type == "response.completed":
-                    usage = getattr(getattr(event, "response", None), "usage", None)
-                    latest_response_id = getattr(getattr(event, "response", None), "id", latest_response_id)
-                    if usage is not None:
-                        yield ChatMessageStreamDelta(
-                            token_usage=TokenUsage(
-                                input_tokens=getattr(usage, "input_tokens", 0),
-                                output_tokens=getattr(usage, "output_tokens", 0),
-                            )
+        try:
+            stream_context = self.retryer(self.client.responses.create, **response_kwargs)
+        except Exception:
+            self._finalize_responses_submission(call_context, success=False)
+            raise
+        success = False
+        try:
+            with stream_context as stream:
+                for event in stream:
+                    event_type = getattr(event, "type", "")
+                    if event_type == "response.output_text.delta":
+                        delta = getattr(event, "delta", "")
+                        accumulated_text += delta
+                        if stop_sequences:
+                            trimmed = remove_content_after_stop_sequences(accumulated_text, stop_sequences)
+                            delta_to_emit = trimmed[len(filtered_text) :]
+                            filtered_text = trimmed
+                            if delta_to_emit:
+                                yield ChatMessageStreamDelta(content=delta_to_emit)
+                        else:
+                            yield ChatMessageStreamDelta(content=delta)
+                    elif (
+                        event_type == "response.output_item.added"
+                        and getattr(getattr(event, "item", None), "type", None) == "function_call"
+                    ):
+                        item = event.item
+                        state = tool_call_state.setdefault(
+                            event.output_index,
+                            {
+                                "arguments": "",
+                                "name": getattr(item, "name", None),
+                                "id": getattr(item, "id", None) or getattr(item, "call_id", None),
+                            },
                         )
-                elif event_type in {"response.failed", "response.error"}:
-                    error = getattr(event, "error", None)
-                    raise RuntimeError(f"OpenAI Responses streaming failed with error: {error}")
+                        state["name"] = getattr(item, "name", state.get("name"))
+                        state["id"] = state.get("id") or getattr(item, "id", None) or getattr(item, "call_id", None)
+                        yield ChatMessageStreamDelta(
+                            tool_calls=[
+                                ChatMessageToolCallStreamDelta(
+                                    index=event.output_index,
+                                    id=state.get("id"),
+                                    type="function",
+                                    function=ChatMessageToolCallFunction(
+                                        name=state.get("name") or "",
+                                        arguments=state.get("arguments", ""),
+                                    ),
+                                )
+                            ]
+                        )
+                    elif event_type == "response.function_call.arguments.delta":
+                        state = tool_call_state.setdefault(
+                            event.output_index,
+                            {"arguments": "", "name": None, "id": getattr(event, "item_id", None)},
+                        )
+                        state["arguments"] += getattr(event, "delta", "")
+                        state["id"] = state.get("id") or getattr(event, "item_id", None)
+                        yield ChatMessageStreamDelta(
+                            tool_calls=[
+                                ChatMessageToolCallStreamDelta(
+                                    index=event.output_index,
+                                    id=state.get("id"),
+                                    type="function",
+                                    function=ChatMessageToolCallFunction(
+                                        name=state.get("name") or "",
+                                        arguments=state.get("arguments", ""),
+                                    ),
+                                )
+                            ]
+                        )
+                    elif event_type == "response.function_call.arguments.done":
+                        state = tool_call_state.setdefault(
+                            event.output_index,
+                            {"arguments": "", "name": getattr(event, "name", None), "id": getattr(event, "item_id", None)},
+                        )
+                        state["arguments"] = getattr(event, "arguments", state.get("arguments", ""))
+                        state["name"] = getattr(event, "name", state.get("name"))
+                        state["id"] = state.get("id") or getattr(event, "item_id", None)
+                        yield ChatMessageStreamDelta(
+                            tool_calls=[
+                                ChatMessageToolCallStreamDelta(
+                                    index=event.output_index,
+                                    id=state.get("id"),
+                                    type="function",
+                                    function=ChatMessageToolCallFunction(
+                                        name=state.get("name") or "",
+                                        arguments=state.get("arguments", ""),
+                                    ),
+                                )
+                            ]
+                        )
+                    elif event_type == "response.completed":
+                        usage = getattr(getattr(event, "response", None), "usage", None)
+                        latest_response_id = getattr(getattr(event, "response", None), "id", latest_response_id)
+                        if usage is not None:
+                            yield ChatMessageStreamDelta(
+                                token_usage=TokenUsage(
+                                    input_tokens=getattr(usage, "input_tokens", 0),
+                                    output_tokens=getattr(usage, "output_tokens", 0),
+                                )
+                            )
+                    elif event_type in {"response.failed", "response.error"}:
+                        error = getattr(event, "error", None)
+                        raise RuntimeError(f"OpenAI Responses streaming failed with error: {error}")
+            success = True
+        finally:
+            self._finalize_responses_submission(call_context, success=success)
         if latest_response_id is not None:
             self._last_response_id = latest_response_id
 
