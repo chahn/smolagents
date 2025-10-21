@@ -1628,9 +1628,6 @@ class OpenAIModel(ApiModel):
             "organization": organization,
             "project": project,
         }
-        self._pending_tool_outputs: list[dict[str, Any]] = []
-        self._submitted_tool_outputs: set[str] = set()
-        self._submitted_input_snapshot: list[dict[str, Any]] = []
         super().__init__(
             model_id=model_id,
             custom_role_conversions=custom_role_conversions,
